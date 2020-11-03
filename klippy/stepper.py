@@ -20,7 +20,8 @@ MIN_BOTH_EDGE_DURATION = 0.000000200
 class MCU_stepper:
     def __init__(self, name, step_pin_params, dir_pin_params,
                  rotation_dist, steps_per_rotation,
-                 step_pulse_duration=None, units_in_radians=False):
+                 step_pulse_duration=None, units_in_radians=False,
+                 speed_mode_params=None):
         self._name = name
         self._rotation_dist = rotation_dist
         self._steps_per_rotation = steps_per_rotation
@@ -52,6 +53,11 @@ class MCU_stepper:
         self._trapq = ffi_main.NULL
         self._mcu.get_printer().register_event_handler('klippy:connect',
                                                        self._query_mcu_position)
+        if speed_mode_params is not None:
+            self._has_speed_mode = True
+            self._speed_mode_params = speed_mode_params
+        else:
+            self._has_speed_mode = False
     def get_mcu(self):
         return self._mcu
     def get_name(self, short=False):
@@ -85,8 +91,15 @@ class MCU_stepper:
         step_pulse_ticks = self._mcu.seconds_to_clock(self._step_pulse_duration)
         self._mcu.add_config_cmd(
             "config_stepper oid=%d step_pin=%s dir_pin=%s invert_step=%d"
-            " step_pulse_ticks=%u" % (self._oid, self._step_pin, self._dir_pin,
-                                      invert_step, step_pulse_ticks))
+            " step_pulse_ticks=%u steps_per_mm=%hu" % (self._oid, self._step_pin, self._dir_pin,
+                                      invert_step, step_pulse_ticks, 1. / self._step_dist))
+        if(self._has_speed_mode):
+            self._mcu.add_config_cmd(
+                "config_stepper_speed_mode oid=%d rate=%hu max_velocity=%u"
+                " max_accel=%u" % (self._oid,
+                self._speed_mode_params['speed_mode_rate'],
+                self._speed_mode_params['speed_mode_max_velocity'],
+                self._speed_mode_params['speed_mode_max_accel']))
         self._mcu.add_config_cmd("reset_step_clock oid=%d clock=0"
                                  % (self._oid,), on_restart=True)
         step_cmd_tag = self._mcu.lookup_command(
@@ -103,6 +116,7 @@ class MCU_stepper:
         ffi_main, ffi_lib = chelper.get_ffi()
         ffi_lib.stepcompress_fill(self._stepqueue, max_error_ticks,
                                   step_cmd_tag, dir_cmd_tag)
+
     def get_oid(self):
         return self._oid
     def get_step_dist(self):
@@ -162,6 +176,17 @@ class MCU_stepper:
         return (data, count)
     def get_stepper_kinematics(self):
         return self._stepper_kinematics
+    # NOTE : resync_mcu_position is currently only working for cartesian robot,
+    # which is almost always the case for the plasma machines it is made for.
+    def resync_mcu_position(self):
+        params = self._get_position_cmd.send([self._oid])
+        mcu_pos = params['pos'] * self._step_dist
+        if self._invert_dir:
+            mcu_pos = -mcu_pos
+        mcu_pos -= self._mcu_position_offset
+        sk = self._stepper_kinematics
+        self._ffi_lib.itersolve_set_position(sk, 0, 0, mcu_pos)
+        return mcu_pos
     def set_stepper_kinematics(self, sk):
         old_sk = self._stepper_kinematics
         mcu_pos = 0
@@ -230,6 +255,8 @@ class MCU_stepper:
         ffi_main, ffi_lib = chelper.get_ffi()
         a = axis.encode()
         return ffi_lib.itersolve_is_active_axis(self._stepper_kinematics, a)
+    def has_speed_mode(self):
+        return self._has_speed_mode
 
 # Helper code to build a stepper object from a config section
 def PrinterStepper(config, units_in_radians=False):
@@ -241,17 +268,24 @@ def PrinterStepper(config, units_in_radians=False):
     step_pin_params = ppins.lookup_pin(step_pin, can_invert=True)
     dir_pin = config.get('dir_pin')
     dir_pin_params = ppins.lookup_pin(dir_pin, can_invert=True)
+
+    try:
+        speed_mode_keys = ['speed_mode_rate',
+                           'speed_mode_max_velocity',
+                           'speed_mode_max_accel']
+        speed_mode_params = {i: config.getint(i) for i in speed_mode_keys}
     rotation_dist, steps_per_rotation = parse_step_distance(
         config, units_in_radians, True)
     step_pulse_duration = config.getfloat('step_pulse_duration', None,
                                           minval=0., maxval=.001)
     mcu_stepper = MCU_stepper(name, step_pin_params, dir_pin_params,
                               rotation_dist, steps_per_rotation,
-                              step_pulse_duration, units_in_radians)
+                              step_pulse_duration, units_in_radians, speed_mode_params)
     # Register with helper modules
     for mname in ['stepper_enable', 'force_move', 'motion_report']:
         m = printer.load_object(config, mname)
         m.register_stepper(config, mcu_stepper)
+
     return mcu_stepper
 
 # Parse stepper gear_ratio config parameter
@@ -297,6 +331,7 @@ def parse_step_distance(config, units_in_radians=None, note_valid=False):
 class PrinterRail:
     def __init__(self, config, need_position_minmax=True,
                  default_position_endstop=None, units_in_radians=False):
+        self._has_speed_mode = False
         # Primary stepper and endstop
         self.stepper_units_in_radians = units_in_radians
         self.steppers = []
@@ -374,6 +409,10 @@ class PrinterRail:
     def add_extra_stepper(self, config):
         stepper = PrinterStepper(config, self.stepper_units_in_radians)
         self.steppers.append(stepper)
+        self._has_speed_mode = stepper.has_speed_mode()
+        if(len(self.steppers) > 1 and self._has_speed_mode):
+            raise config.error("Speed mode not available for multiple"
+            " stepper axis (see '%s')." % (config.get_name(),))
         if self.endstops and config.get('endstop_pin', None) is None:
             # No endstop defined - use primary endstop
             self.endstops[0][0].add_stepper(stepper)
@@ -417,6 +456,8 @@ class PrinterRail:
     def set_position(self, coord):
         for stepper in self.steppers:
             stepper.set_position(coord)
+    def has_speed_mode(self):
+        return self._has_speed_mode
 
 # Wrapper for dual stepper motor support
 def LookupMultiRail(config, need_position_minmax=True,

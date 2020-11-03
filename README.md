@@ -1,18 +1,16 @@
-Welcome to the Klipper project!
+# Klipper for Plasma
 
-[![Klipper](docs/img/klipper-logo-small.png)](https://www.klipper3d.org/)
+This is a Klipper fork dedicated to plasma CNC machines, work is still in progress and any help is welcome !
 
-https://www.klipper3d.org/
+**IMPORTANT : This is not a stable release. It is currently in use on a real machine and performs fine, but there are still many input protections missing. A non experienced user can send invalid gcode sequence leading to unattended consequences.**
 
-Klipper is a 3d-Printer firmware. It combines the power of a general
-purpose computer with one or more micro-controllers. See the
-[features document](https://www.klipper3d.org/Features.html) for more
-information on why you should use Klipper.
+You can read [documentation here](https://klipper-plasma.readthedocs.io), or have a look at [Sheetah](https://github.com/proto3/Sheetah), a plasma CAM software designed to work in pair with Klipper and enabling THC graphical monitoring.
 
-To begin using Klipper start by
-[installing](https://www.klipper3d.org/Installation.html) it.
+## Features
+- Everything from the original Klipper. This version will kept rebased on official as long as possible to benefits from updates and bugfixes.
+- Integrated THC (Torch Height Control).
+- THC real-time monitoring.
+- THC anti-dive, z axis pauses under a specified feedrate.
+- Instant stepper reactivity, required for precise piercing delays but not possible with original Klipper implementation.
+- Various plasma related safety improvements (PC independant emergency stop, input commands timeout during cuts, serial link loss detection)
 
-Klipper is Free Software. See the [license](COPYING) or read the
-[documentation](https://www.klipper3d.org/Overview.html). We depend on
-the generous support from our
-[sponsors](https://www.klipper3d.org/Sponsors.html).
